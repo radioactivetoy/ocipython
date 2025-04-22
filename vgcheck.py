@@ -277,16 +277,17 @@ def generate_cli_commands(instance: oci.core.models.Instance,
 
     if not associated_group_data:
         # Case 1: No volume group exists (STATUS_NO_GROUP)
-        # --- Generate VG Name based on Instance Name ---
+        # --- Generate VG Name based on Instance Name (NO SUFFIX) ---
         logger.debug("  - Generating command for creating a new Volume Group.")
 
         # Apply the naming rule: instance name with "ins" replaced by "vg"
         vg_base_name_transformed = instance.display_name.replace("ins", "vg")
         # Basic sanitization for potentially invalid characters in names
-        vg_base_name_sanitized = vg_base_name_transformed.replace(" ", "_").replace(":", "_")
-        # Add instance ID suffix for uniqueness, crucial if transformation isn't unique
-        vg_display_name = f"{vg_base_name_sanitized}_{instance.id[-6:]}"
+        vg_display_name = vg_base_name_transformed.replace(" ", "_").replace(":", "_")
+        # REMOVED: _{instance.id[-6:]} suffix
+
         logger.debug(f"  - Proposed VG display name based on instance '{instance.display_name}': '{vg_display_name}'")
+        logger.warning(f"  - Ensure proposed VG name '{vg_display_name}' will be unique in compartment {instance.compartment_id}")
 
         # --- End VG Name Generation ---
 
@@ -305,8 +306,8 @@ def generate_cli_commands(instance: oci.core.models.Instance,
 
         cli_commands.append(f"# Step 1: Create a new volume group for instance {instance.display_name}")
         cli_commands.append(command_create_vg)
-        # Keep note about replacing name if desired
-        cli_commands.append(f"# Note: Suggested name is '{vg_display_name}'. Replace if needed.")
+        # Update note about replacing name if desired
+        cli_commands.append(f"# Note: Suggested name is '{vg_display_name}'. Replace if needed, ensure it's unique.")
         cli_commands.append(f"#       The command waits until the VG is AVAILABLE.")
 
         # Command 2: Assign the Backup Policy using 'assignment create'
@@ -328,7 +329,7 @@ def generate_cli_commands(instance: oci.core.models.Instance,
 
     else:
         # Case 2: Volume group exists, but is non-compliant
-        # (This section remains unchanged as it deals with existing groups)
+        # (This section remains unchanged)
         logger.debug(f"  - Generating command(s) for updating existing VG: {associated_group_data.display_name} ({associated_group_data.id})")
         vg_id_arg = f"--volume-group-id {associated_group_data.id}"
         group_name = associated_group_data.display_name
