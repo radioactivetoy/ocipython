@@ -255,7 +255,7 @@ def generate_cli_commands(instance: oci.core.models.Instance,
                           compliance_status: str) -> List[str]:
     """
     Generates OCI CLI commands to fix compliance issues for an instance.
-    (Docstring Args/Returns updated)
+    (Args documentation updated)
     """
     cli_commands: List[str] = []
     instance_volume_ids: List[str] = [v.id for v in instance_volumes if v]
@@ -277,10 +277,19 @@ def generate_cli_commands(instance: oci.core.models.Instance,
 
     if not associated_group_data:
         # Case 1: No volume group exists (STATUS_NO_GROUP)
-        # --- Needs TWO commands: Create VG, then Assign Policy ---
+        # --- Generate VG Name based on Instance Name ---
         logger.debug("  - Generating command for creating a new Volume Group.")
-        vg_base_name = instance.display_name.replace(" ", "_").replace(":", "_")
-        vg_display_name = f"vg_{vg_base_name}_{instance.id[-6:]}"
+
+        # Apply the naming rule: instance name with "ins" replaced by "vg"
+        vg_base_name_transformed = instance.display_name.replace("ins", "vg")
+        # Basic sanitization for potentially invalid characters in names
+        vg_base_name_sanitized = vg_base_name_transformed.replace(" ", "_").replace(":", "_")
+        # Add instance ID suffix for uniqueness, crucial if transformation isn't unique
+        vg_display_name = f"{vg_base_name_sanitized}_{instance.id[-6:]}"
+        logger.debug(f"  - Proposed VG display name based on instance '{instance.display_name}': '{vg_display_name}'")
+
+        # --- End VG Name Generation ---
+
         availability_domain_arg = f"--availability-domain \"{instance.availability_domain}\""
         source_details = {"type": "volumeIds", "volumeIds": instance_volume_ids}
         source_details_arg = f"--source-details '{json.dumps(source_details)}'"
@@ -288,6 +297,7 @@ def generate_cli_commands(instance: oci.core.models.Instance,
         # Command 1: Create the Volume Group (NO policy here)
         command_create_vg = (
             f"oci bv volume-group create {compartment_id_arg} {availability_domain_arg} "
+            # Use the generated display name
             f"--display-name \"{vg_display_name}\" {source_details_arg} "
             f"{defined_tags_arg} {freeform_tags_arg}"
             f" --wait-for-state AVAILABLE" # Wait for VG to be ready
@@ -295,11 +305,12 @@ def generate_cli_commands(instance: oci.core.models.Instance,
 
         cli_commands.append(f"# Step 1: Create a new volume group for instance {instance.display_name}")
         cli_commands.append(command_create_vg)
-        cli_commands.append(f"# Note: Replace '{vg_display_name}' with desired name if needed.")
+        # Keep note about replacing name if desired
+        cli_commands.append(f"# Note: Suggested name is '{vg_display_name}'. Replace if needed.")
         cli_commands.append(f"#       The command waits until the VG is AVAILABLE.")
 
-        # Command 2: Assign the Backup Policy
-        new_vg_ocid_placeholder = f"<ocid-of-newly-created-vg-{vg_display_name}>"
+        # Command 2: Assign the Backup Policy using 'assignment create'
+        new_vg_ocid_placeholder = f"<ocid-of-newly-created-vg-{vg_display_name}>" # Use proposed name in placeholder
         policy_assign_asset_id_arg = f"--asset-id {new_vg_ocid_placeholder}"
         policy_assign_policy_id_arg = f"--policy-id {effective_policy_ocid}"
 
@@ -317,6 +328,7 @@ def generate_cli_commands(instance: oci.core.models.Instance,
 
     else:
         # Case 2: Volume group exists, but is non-compliant
+        # (This section remains unchanged as it deals with existing groups)
         logger.debug(f"  - Generating command(s) for updating existing VG: {associated_group_data.display_name} ({associated_group_data.id})")
         vg_id_arg = f"--volume-group-id {associated_group_data.id}"
         group_name = associated_group_data.display_name
@@ -325,7 +337,6 @@ def generate_cli_commands(instance: oci.core.models.Instance,
         # Check 2a: Volumes missing/mismatched (STATUS_MISSING_VOLUMES)
         if compliance_status.startswith(STATUS_MISSING_VOLUMES):
             volume_ids_arg = f"--volume-ids '{json.dumps(instance_volume_ids)}'"
-            # Volume group update DOES allow setting tags simultaneously
             command_update_volumes = (
                 f"oci bv volume-group update {vg_id_arg} {volume_ids_arg} "
                 f"{defined_tags_arg} {freeform_tags_arg}"
@@ -335,7 +346,7 @@ def generate_cli_commands(instance: oci.core.models.Instance,
             volume_update_needed = True
 
         # Check 2b: No policy or wrong policy (STATUS_NO_POLICY or STATUS_WRONG_POLICY)
-        # --- This now ALWAYS requires a separate assignment command ---
+        # --- Use 'assignment create' to assign/replace the policy ---
         if compliance_status == STATUS_NO_POLICY or compliance_status == STATUS_WRONG_POLICY:
             policy_assign_asset_id_arg = f"--asset-id {associated_group_data.id}" # Use EXISTING VG OCID
             policy_assign_policy_id_arg = f"--policy-id {effective_policy_ocid}"
@@ -350,7 +361,6 @@ def generate_cli_commands(instance: oci.core.models.Instance,
             policy_target_desc = f"policy {effective_policy_ocid}" if policy_ocid_for_command else "a suitable backup policy (placeholder)"
 
             cli_commands.append(f"# Suggestion: {reason} {policy_target_desc} to existing group '{group_name}'.")
-            # If volume update was also needed, add a note about sequence
             if volume_update_needed:
                 cli_commands.append(f"#           (Run this command *after* the volume group update if applicable)")
             cli_commands.append(command_assign_policy)
