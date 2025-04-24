@@ -2,7 +2,7 @@ import argparse
 import logging
 import re
 import sys
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 import oci
 
@@ -82,17 +82,14 @@ def resolve_source_cidrs(
     :param network_lists: Mapping of network list names to lists of CIDRs
     :return: List of CIDR strings
     """
-    # Direct CIDR
     cidr_pattern = r"^\d+\.\d+\.\d+\.\d+/\d{1,2}$"
     if re.match(cidr_pattern, source):
         return [source]
 
-    # Subnet name partial or exact match
     matches = [cidr for name, cidr in subnet_map.items() if source.lower() in name.lower()]
     if matches:
         return matches
 
-    # Network list lookup
     if source in network_lists:
         return network_lists[source]
 
@@ -111,8 +108,9 @@ def create_port_options(
     :param ports: Comma-separated list of ports or 'any'
     :return: Dictionary with key 'tcp_options' or 'udp_options' and a PortRange object
     """
+    # OCI requires port min >= 1
     if ports == 'any':
-        pr = oci.core.models.PortRange(min=0, max=65535)
+        pr = oci.core.models.PortRange(min=1, max=65535)
     else:
         nums = [int(p) for p in ports.split(',') if p.isdigit()]
         pr = oci.core.models.PortRange(min=min(nums), max=max(nums)) if nums else None
@@ -152,6 +150,15 @@ def build_ingress_rules(
             logger.warning(f"Unsupported protocol '{rule['protocol']}'")
             continue
 
+        # Validate and trim description
+        desc = rule['description'] or ''
+        if len(desc) > 255:
+            logger.warning(f"Description too long ({len(desc)} chars), trimming to 255.")
+            desc = desc[:255]
+        if not desc:
+            logger.warning("Empty description, skipping rule.")
+            continue
+
         port_opts = create_port_options(rule['protocol'], rule['ports'])
         for cidr in cidrs:
             built_rules.append(
@@ -159,7 +166,7 @@ def build_ingress_rules(
                     protocol=protocol_num,
                     source=cidr,
                     source_type='CIDR_BLOCK',
-                    description=rule['description'],
+                    description=desc,
                     **port_opts
                 )
             )
@@ -182,44 +189,36 @@ def update_security_list(
     :param network_file: Path to network list file
     :param dry_run: If True, only print planned changes without applying them
     """
-    # Load OCI config and client
     config = oci.config.from_file(profile_name=config_profile)
     vcn_client = oci.core.VirtualNetworkClient(config)
 
-    # Retrieve existing security list
     sec_list = vcn_client.get_security_list(security_list_ocid).data
     vcn_id = sec_list.vcn_id
     comp_id = sec_list.compartment_id
 
-    # Map subnets in VCN
     subnets = vcn_client.list_subnets(comp_id, vcn_id=vcn_id).data
     subnet_map = {s.display_name: s.cidr_block for s in subnets}
 
-    # Parse inputs
     network_lists = load_network_list(network_file)
     ingress_rules_data = load_ingress_rules(ingress_file)
 
-    # Build new ingress rules
     new_ingress = build_ingress_rules(ingress_rules_data, subnet_map, network_lists)
     if not new_ingress:
         logger.error("No valid ingress rules generated. Exiting.")
         sys.exit(1)
 
-    # Show planned changes if dry run
     if dry_run:
         logger.info(f"Dry run: would apply {len(new_ingress)} new ingress rule(s) to {security_list_ocid}:")
         for rule in new_ingress:
             logger.info(f"  {rule}")
         return
 
-    # Prepare update details
     update_details = oci.core.models.UpdateSecurityListDetails(
         ingress_security_rules=new_ingress,
         egress_security_rules=sec_list.egress_security_rules,
         display_name=sec_list.display_name
     )
 
-    # Perform update
     vcn_client.update_security_list(security_list_ocid, update_details)
     logger.info("Security list updated successfully.")
 
