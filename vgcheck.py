@@ -97,7 +97,7 @@ def generate_cli_commands(instance, volumes, group_data, policy_id):
     freeform_tags = instance.freeform_tags or {}
 
     if not group_data:
-        base_name = instance.display_name.replace("ins", "vg")
+        base_name = instance.display_name.replace("ins", "vgp")
         name = base_name
         source_details = {
             "type": "volumeIds",
