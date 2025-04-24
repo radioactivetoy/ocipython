@@ -280,8 +280,8 @@ def generate_cli_commands(instance: oci.core.models.Instance,
         # --- Generate VG Name based on Instance Name (NO SUFFIX) ---
         logger.debug("  - Generating command for creating a new Volume Group.")
 
-        # Apply the naming rule: instance name with "ins" replaced by "vg"
-        vg_base_name_transformed = instance.display_name.replace("ins", "vg")
+        # Apply the naming rule: instance name with  replaced by "vg"
+        vg_base_name_transformed = instance.display_name.replace("ins", "vgp")
         # Basic sanitization for potentially invalid characters in names
         vg_display_name = vg_base_name_transformed.replace(" ", "_").replace(":", "_")
         # REMOVED: _{instance.id[-6:]} suffix
