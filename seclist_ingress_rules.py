@@ -2,7 +2,7 @@ import argparse
 import logging
 import re
 import sys
-from typing import Dict, List
+from typing import Dict, List, Any
 
 import oci
 
@@ -100,30 +100,32 @@ def resolve_source_cidrs(
 def create_port_options(
     protocol: str,
     ports: str
-) -> Dict[str, oci.core.models.PortRange]:
+) -> Dict[str, Any]:
     """
     Create TCP/UDP options for destination port ranges.
 
-    :param protocol: 'tcp', 'udp', or 'any'
-    :param ports: Comma-separated list of ports or 'any'
-    :return: Dictionary with key 'tcp_options' or 'udp_options' and a PortRange object
-    """
-    # OCI requires port min >= 1
-    if ports == 'any':
-        pr = oci.core.models.PortRange(min=1, max=65535)
-    else:
-        nums = [int(p) for p in ports.split(',') if p.isdigit()]
-        pr = oci.core.models.PortRange(min=min(nums), max=max(nums)) if nums else None
+    For 'any' ports, omit port options entirely so OCI displays 'All'.
 
-    if not pr:
+    :param protocol: 'tcp', 'udp'
+    :param ports: Comma-separated list of ports or 'any'
+    :return: Dict of options for TcpOptions or UdpOptions, or empty
+    """
+    # If 'any', omit options to allow all ports
+    if ports == 'any':
         return {}
 
+    # Parse specific port list
+    nums = [int(p) for p in ports.split(',') if p.isdigit()]
+    if not nums:
+        logger.warning(f"Invalid ports specification '{ports}', skipping options.")
+        return {}
+
+    pr = oci.core.models.PortRange(min=min(nums), max=max(nums))
     if protocol == 'tcp':
         return {'tcp_options': oci.core.models.TcpOptions(destination_port_range=pr)}
-    elif protocol == 'udp':
+    if protocol == 'udp':
         return {'udp_options': oci.core.models.UdpOptions(destination_port_range=pr)}
-    else:
-        return {}
+    return {}
 
 
 def build_ingress_rules(
