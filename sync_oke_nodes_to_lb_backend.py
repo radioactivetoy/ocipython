@@ -22,21 +22,31 @@ def init_clients(region, profile):
     vcn_client  = oci.core.VirtualNetworkClient(cfg)
     return lb_client, ce_client, compute, vcn_client
 
-def list_node_ips(ce_client, compute, vcn_client, cluster_id, compartment_id):
-    pools = ce_client.list_node_pools(compartment_id, cluster_id=cluster_id).data
-    ips = set()
-    for pool in pools:
-        nodes = ce_client.list_node_pool_nodes(compartment_id, pool.id).data
-        for node in nodes:
-            inst_id = node.compute_instance_id
-            attachments = vcn_client.list_vnic_attachments(
-                compartment_id, instance_id=inst_id
-            ).data
-            for attach in attachments:
-                vnic = vcn_client.get_vnic(attach.vnic_id).data
+def list_node_ips(ce_client, compute_client, vcn_client, cluster_id, compartment_id):
+    # Retrieve all node pools in the specified cluster
+    node_pools = ce_client.list_node_pools(compartment_id=compartment_id, cluster_id=cluster_id).data
+
+    node_ips = set()
+
+    for pool in node_pools:
+        # Get details of the node pool
+        node_pool = ce_client.get_node_pool(pool.id).data
+
+        # Iterate over the node IDs in the node pool
+        for node_id in node_pool.nodes:
+            # Get details of the compute instance
+            instance = compute_client.get_instance(node_id).data
+
+            # List VNIC attachments for the instance
+            vnic_attachments = vcn_client.list_vnic_attachments(compartment_id=compartment_id, instance_id=instance.id).data
+
+            for va in vnic_attachments:
+                # Get VNIC details
+                vnic = vcn_client.get_vnic(va.vnic_id).data
                 if vnic.private_ip:
-                    ips.add(vnic.private_ip)
-    return sorted(ips)
+                    node_ips.add(vnic.private_ip)
+
+    return sorted(node_ips)
 
 def sync_backends(lb_client, lb_id, node_ips, dry_run=False):
     for bs in lb_client.list_backend_sets(lb_id).data:
