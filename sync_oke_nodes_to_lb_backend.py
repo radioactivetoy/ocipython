@@ -34,19 +34,26 @@ def list_node_ips(ce_client, compute_client, vcn_client, cluster_id, compartment
 
         # Iterate over the node IDs in the node pool
         for node_id in node_pool.nodes:
-            # Get details of the compute instance
-            instance = compute_client.get_instance(node_id).data
+            try:
+                # Get details of the compute instance
+                instance = compute_client.get_instance(node_id).data
 
-            # List VNIC attachments for the instance
-            vnic_attachments = vcn_client.list_vnic_attachments(compartment_id=compartment_id, instance_id=instance.id).data
+                # List VNIC attachments for the instance
+                vnic_attachments = vcn_client.list_vnic_attachments(compartment_id=compartment_id, instance_id=instance.id).data
 
-            for va in vnic_attachments:
-                # Get VNIC details
-                vnic = vcn_client.get_vnic(va.vnic_id).data
-                if vnic.private_ip:
-                    node_ips.add(vnic.private_ip)
+                for va in vnic_attachments:
+                    # Get VNIC details
+                    vnic = vcn_client.get_vnic(va.vnic_id).data
+                    if vnic.private_ip:
+                        node_ips.add(vnic.private_ip)
+            except oci.exceptions.ServiceError as e:
+                if e.status == 404:
+                    print(f"Instance {node_id} not found or access denied.")
+                else:
+                    raise
 
     return sorted(node_ips)
+
 
 def sync_backends(lb_client, lb_id, node_ips, dry_run=False):
     for bs in lb_client.list_backend_sets(lb_id).data:
