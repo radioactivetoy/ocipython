@@ -26,19 +26,27 @@ Features:
 
 import oci
 import sys
-import logging
+
 import argparse
 import json
-import csv
-from tabulate import tabulate
 from datetime import datetime
 from oci.pagination import list_call_get_all_results
-# Ensure Union is imported for Python < 3.10 compatibility
 from typing import Dict, List, Tuple, Optional, Any, Set, Union
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+try:
+    from rich.console import Console, Group
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.syntax import Syntax
+    from rich.text import Text
+    from rich.box import ASCII
+    from rich.live import Live
+    from rich.spinner import Spinner
+except ImportError:
+    print("Please install the 'rich' library for enhanced output: pip install rich")
+    sys.exit(1)
+
+# Configure logging (using rich console for output)
 
 # Constants
 DEFAULT_PLATFORM_FILTER = "platform"
@@ -51,24 +59,24 @@ STATUS_WRONG_POLICY = "Non-compliant: Incorrect Backup Policy assigned" # New St
 POLICY_NAME_NONE = "None" # String used when no policy is found
 
 
-def get_regions(identity_client: oci.identity.IdentityClient, tenancy_id: str) -> List[oci.identity.models.RegionSubscription]:
+def get_regions(identity_client: oci.identity.IdentityClient, tenancy_id: str, console: Console) -> List[oci.identity.models.RegionSubscription]:
     """Fetches available region subscriptions for the tenancy."""
     try:
         regions = identity_client.list_region_subscriptions(tenancy_id).data
-        logger.info(f"Successfully retrieved {len(regions)} region subscriptions.")
+        console.log(f"[green]Successfully retrieved {len(regions)} region subscriptions.[/green]")
         return regions
     except oci.exceptions.ServiceError as e:
-        logger.error(f"Error fetching regions for tenancy {tenancy_id}: {e}")
+        console.log(f"[red]Error fetching regions for tenancy {tenancy_id}: {e}[/red]")
         raise
 
 
 def get_all_compartments(identity_client: oci.identity.IdentityClient,
                          tenancy_id: str,
-                         name_filter: Optional[str]) -> Tuple[List[str], Dict[str, str]]:
+                         name_filter: Optional[str],
+                         console: Console) -> Tuple[List[str], Dict[str, str]]:
     """
     Retrieves all active compartments recursively, optionally filtering by name.
     Includes the root compartment (tenancy) if it matches the filter or if no filter is provided.
-    (Docstring Args/Returns omitted for brevity)
     """
     compartment_ids: List[str] = []
     compartment_names: Dict[str, str] = {}
@@ -81,11 +89,11 @@ def get_all_compartments(identity_client: oci.identity.IdentityClient,
         if not processed_filter or processed_filter in root_name.lower():
             compartment_ids.append(tenancy_id)
             compartment_names[tenancy_id] = f"Root ({root_name})"
-            logger.info(f"Including root compartment: {compartment_names[tenancy_id]}")
+            console.log(f"[green]Including root compartment:[/green] [bold]{compartment_names[tenancy_id]}[/bold]")
         else:
-             logger.info(f"Excluding root compartment '{root_name}' due to filter '{processed_filter}'.")
+             console.log(f"[yellow]Excluding root compartment '{root_name}' due to filter '{processed_filter}'.[/yellow]")
     except oci.exceptions.ServiceError as e:
-        logger.warning(f"Could not retrieve tenancy name for {tenancy_id}. Skipping root compartment check. Error: {e}")
+        console.log(f"[yellow]Warning: Could not retrieve tenancy name for {tenancy_id}. Skipping root compartment check. Error: {e}[/yellow]")
 
     # Get all other active compartments
     try:
@@ -96,7 +104,7 @@ def get_all_compartments(identity_client: oci.identity.IdentityClient,
             lifecycle_state=oci.identity.models.Compartment.LIFECYCLE_STATE_ACTIVE
         ).data
 
-        logger.info(f"Retrieved {len(all_compartments_data)} total active compartments.")
+        console.log(f"[green]Retrieved {len(all_compartments_data)} total active compartments.[/green]")
 
         for comp in all_compartments_data:
             # Filter only if a filter string is provided
@@ -104,33 +112,34 @@ def get_all_compartments(identity_client: oci.identity.IdentityClient,
                 compartment_ids.append(comp.id)
                 compartment_names[comp.id] = comp.name
 
-        logger.info(f"Found {len(compartment_ids)} compartments matching filter '{processed_filter or 'None'}'.")
+        console.log(f"[green]Found {len(compartment_ids)} compartments matching filter '{processed_filter or 'None'}'.[/green]")
 
     except oci.exceptions.ServiceError as e:
-        logger.error(f"Error listing compartments under tenancy {tenancy_id}: {e}")
+        console.log(f"[red]Error listing compartments under tenancy {tenancy_id}: {e}[/red]")
 
     return compartment_ids, compartment_names
 
 
 def get_backup_policy_details(blockstorage_client: oci.core.BlockstorageClient,
-                              policy_id: str) -> Optional[oci.core.models.VolumeBackupPolicy]:
+                              policy_id: str,
+                              console: Console) -> Optional[oci.core.models.VolumeBackupPolicy]:
     """Fetches the full details of a backup policy."""
     try:
         policy = blockstorage_client.get_volume_backup_policy(policy_id).data
         return policy
     except oci.exceptions.ServiceError as e:
-        logger.warning(f"Could not fetch details for policy {policy_id}: {e}")
+        console.log(f"[yellow]Warning: Could not fetch details for policy {policy_id}: {e}[/yellow]")
         return None
 
 
 def get_volume_group_map(blockstorage_client: oci.core.BlockstorageClient,
-                         compartment_ids: List[str]) -> Dict[str, Tuple[oci.core.models.VolumeGroup, Optional[oci.core.models.VolumeBackupPolicy]]]:
+                         compartment_ids: List[str],
+                         console: Console) -> Dict[str, Tuple[oci.core.models.VolumeGroup, Optional[oci.core.models.VolumeBackupPolicy]]]:
     """
     Builds a map associating volume OCIDs with their volume group and backup policy objects.
-    (Docstring Args/Returns omitted for brevity)
     """
     volume_to_group_policy: Dict[str, Tuple[oci.core.models.VolumeGroup, Optional[oci.core.models.VolumeBackupPolicy]]] = {}
-    logger.info("Building volume-to-volume-group-and-policy mapping...")
+    console.log("[green]Building volume-to-volume-group-and-policy mapping...[/green]")
     processed_vgs = 0
     policy_cache: Dict[str, Optional[oci.core.models.VolumeBackupPolicy]] = {} # Cache policy lookups
 
@@ -141,7 +150,7 @@ def get_volume_group_map(blockstorage_client: oci.core.BlockstorageClient,
                 compartment_id=comp_id,
                 lifecycle_state = oci.core.models.VolumeGroup.LIFECYCLE_STATE_AVAILABLE
             ).data
-            logger.debug(f"Found {len(volume_groups)} available VGs in compartment {comp_id}.")
+            console.log(f"[dim]Debug: Found {len(volume_groups)} available VGs in compartment {comp_id}.[/dim]")
 
             for vg_summary in volume_groups:
                 try:
@@ -156,73 +165,73 @@ def get_volume_group_map(blockstorage_client: oci.core.BlockstorageClient,
                         if assignments and assignments[0].policy_id:
                             policy_id = assignments[0].policy_id
                             if policy_id not in policy_cache:
-                                policy_cache[policy_id] = get_backup_policy_details(blockstorage_client, policy_id)
+                                policy_cache[policy_id] = get_backup_policy_details(blockstorage_client, policy_id, console)
                             policy = policy_cache[policy_id]
                     except oci.exceptions.ServiceError as e:
                         if e.status != 404:
-                             logger.warning(f"Error getting policy assignment for VG {vg_data.id}: {e}")
+                             console.log(f"[yellow]Warning: Error getting policy assignment for VG {vg_data.id}: {e}[/yellow]")
                     except Exception as e:
-                         logger.warning(f"Unexpected error getting policy for VG {vg_data.id}: {e}", exc_info=False)
+                         console.log(f"[red]Error: Unexpected error getting policy for VG {vg_data.id}: {e}[/red]", exc_info=False)
 
                     policy_display = policy.display_name if policy else POLICY_NAME_NONE
-                    logger.debug(f"VG '{vg_data.display_name}' ({vg_data.id}) has policy '{policy_display}' ({policy_id or 'None'}).")
+                    console.log(f"[dim]Debug: VG '{vg_data.display_name}' ({vg_data.id}) has policy '{policy_display}' ({policy_id or 'None'}).[/dim]")
 
                     if vg_data.volume_ids:
                         for volume_id in vg_data.volume_ids:
                             volume_to_group_policy[volume_id] = (vg_data, policy)
                     else:
-                         logger.debug(f"VG '{vg_data.display_name}' ({vg_data.id}) contains no volumes.")
+                         console.log(f"[dim]Debug: VG '{vg_data.display_name}' ({vg_data.id}) contains no volumes.[/dim]")
 
                 except oci.exceptions.ServiceError as e:
-                    logger.warning(f"Error fetching details for VG {vg_summary.id}. Skipping. Error: {e}")
+                    console.log(f"[yellow]Warning: Error fetching details for VG {vg_summary.id}. Skipping. Error: {e}[/yellow]")
                 except Exception as e:
-                     logger.warning(f"Unexpected error processing VG {vg_summary.id}. Skipping. Error: {e}", exc_info=False)
+                     console.log(f"[red]Error: Unexpected error processing VG {vg_summary.id}. Skipping. Error: {e}[/red]", exc_info=False)
 
         except oci.exceptions.ServiceError as e:
-            logger.error(f"Error listing VGs in compartment {comp_id}. Skipping compartment. Error: {e}")
+            console.log(f"[red]Error listing VGs in compartment {comp_id}. Skipping compartment. Error: {e}[/red]")
 
-    logger.info(f"Finished mapping: Processed {processed_vgs} VGs, mapped {len(volume_to_group_policy)} unique volumes.")
+    console.log(f"[green]Finished mapping: Processed {processed_vgs} VGs, mapped {len(volume_to_group_policy)} unique volumes.[/green]")
     return volume_to_group_policy
 
 
 def find_policy_ocid_by_name(blockstorage_client: oci.core.BlockstorageClient,
                              policy_name: str,
-                             compartment_ids: List[str]) -> Optional[str]:
+                             compartment_ids: List[str],
+                             console: Console) -> Optional[str]:
     """
     Searches for an enabled volume backup policy by display name across specified compartments.
-    (Docstring Args/Returns omitted for brevity)
     """
-    logger.info(f"Searching for enabled backup policy with name: '{policy_name}'...")
+    console.log(f"[green]Searching for enabled backup policy with name:[/green] [bold]'{policy_name}'[/bold]...")
     found_policies = []
     for comp_id in compartment_ids:
         try:
-            policies = list_call_get_all_results(
+            policies_summary = list_call_get_all_results(
                 blockstorage_client.list_volume_backup_policies,
-                compartment_id=comp_id,
-                display_name=policy_name
+                compartment_id=comp_id
             ).data
-            if policies:
-                enabled_policies = [p for p in policies if p.lifecycle_state == oci.core.models.VolumeBackupPolicy.LIFECYCLE_STATE_ENABLED]
-                if enabled_policies:
-                    found_policies.extend(enabled_policies)
-                    logger.debug(f"Found {len(enabled_policies)} enabled policies matching name '{policy_name}' in compartment {comp_id}.")
+
+            # Filter by display name. (Lifecycle state check removed due to SDK compatibility issues)
+            matching_policies = [p for p in policies_summary if p.display_name == policy_name]
+            if matching_policies:
+                found_policies.extend(matching_policies)
+                console.log(f"[dim]Debug: Found policy '{policy_name}' in compartment {comp_id}.[/dim]")
 
         except oci.exceptions.ServiceError as e:
             if e.status in [404, 401, 403]:
-                 logger.debug(f"Skipping policy search in compartment {comp_id} due to permissions/not found: {e.status}")
+                 console.log(f"[dim]Debug: Skipping policy search in compartment {comp_id} due to permissions/not found: {e.status}[/dim]")
             else:
-                 logger.warning(f"Error listing policies in compartment {comp_id} searching for '{policy_name}': {e}")
+                 console.log(f"[yellow]Warning: Error listing policies in compartment {comp_id} searching for '{policy_name}': {e}[/yellow]")
 
     unique_ocids = list(set([p.id for p in found_policies]))
     if len(unique_ocids) == 1:
         policy_ocid = unique_ocids[0]
-        logger.info(f"Found unique enabled policy OCID (across searched compartments): {policy_ocid} for name '{policy_name}'.")
+        console.log(f"[green]Found unique enabled policy OCID (across searched compartments):[/green] [bold]{policy_ocid}[/bold] for name '{policy_name}'.")
         return policy_ocid
     elif len(unique_ocids) == 0:
-        logger.warning(f"Could not find any enabled backup policy named '{policy_name}' in the searched compartments.")
+        console.log(f"[yellow]Warning: Could not find any enabled backup policy named '{policy_name}' in the searched compartments.[/yellow]")
         return None
     else:
-        logger.warning(f"Found {len(unique_ocids)} distinct enabled backup policies named '{policy_name}'. Cannot determine unique OCID. OCIDs found: {unique_ocids}")
+        console.log(f"[yellow]Warning: Found {len(unique_ocids)} distinct enabled backup policies named '{policy_name}'. Cannot determine unique OCID. OCIDs found: {unique_ocids}[/yellow]")
         return None
 
 
@@ -252,7 +261,8 @@ def generate_cli_commands(instance: oci.core.models.Instance,
                           associated_group_data: Optional[oci.core.models.VolumeGroup],
                           associated_policy: Optional[oci.core.models.VolumeBackupPolicy],
                           policy_ocid_for_command: Optional[str], # The resolved OCID to USE in the command
-                          compliance_status: str) -> List[str]:
+                          compliance_status: str,
+                          console: Console) -> List[str]:
     """
     Generates OCI CLI commands to fix compliance issues for an instance.
     (Args documentation updated)
@@ -268,7 +278,7 @@ def generate_cli_commands(instance: oci.core.models.Instance,
     effective_policy_ocid = policy_ocid_for_command if policy_ocid_for_command else "<your-backup-policy-ocid-here>"
     policy_comment = f"using policy {effective_policy_ocid}" if policy_ocid_for_command else "using a suitable policy (placeholder)"
 
-    logger.debug(f"generate_cli_commands for {instance.display_name}, status: {compliance_status}, policy_for_cmd: {policy_ocid_for_command}")
+    console.log(f"[dim]Debug: generate_cli_commands for {instance.display_name}, status: {compliance_status}, policy_for_cmd: {policy_ocid_for_command}[/dim]")
 
     # Prepare common arguments
     compartment_id_arg = f"--compartment-id {instance.compartment_id}"
@@ -278,7 +288,7 @@ def generate_cli_commands(instance: oci.core.models.Instance,
     if not associated_group_data:
         # Case 1: No volume group exists (STATUS_NO_GROUP)
         # --- Generate VG Name based on Instance Name (NO SUFFIX) ---
-        logger.debug("  - Generating command for creating a new Volume Group.")
+        console.log("[dim]Debug:   - Generating command for creating a new Volume Group.[/dim]")
 
         # Apply the naming rule: instance name with  replaced by "vg"
         vg_base_name_transformed = instance.display_name.replace("ins", "vgp")
@@ -286,8 +296,8 @@ def generate_cli_commands(instance: oci.core.models.Instance,
         vg_display_name = vg_base_name_transformed.replace(" ", "_").replace(":", "_")
         # REMOVED: _{instance.id[-6:]} suffix
 
-        logger.debug(f"  - Proposed VG display name based on instance '{instance.display_name}': '{vg_display_name}'")
-        logger.warning(f"  - Ensure proposed VG name '{vg_display_name}' will be unique in compartment {instance.compartment_id}")
+        console.log(f"[dim]Debug:   - Proposed VG display name based on instance '{instance.display_name}': '{vg_display_name}'[/dim]")
+        console.log(f"[yellow]Warning:   - Ensure proposed VG name '{vg_display_name}' will be unique in compartment {instance.compartment_id}[/yellow]")
 
         # --- End VG Name Generation ---
 
@@ -330,7 +340,7 @@ def generate_cli_commands(instance: oci.core.models.Instance,
     else:
         # Case 2: Volume group exists, but is non-compliant
         # (This section remains unchanged)
-        logger.debug(f"  - Generating command(s) for updating existing VG: {associated_group_data.display_name} ({associated_group_data.id})")
+        console.log(f"[dim]Debug:   - Generating command(s) for updating existing VG: {associated_group_data.display_name} ({associated_group_data.id})[/dim]")
         vg_id_arg = f"--volume-group-id {associated_group_data.id}"
         group_name = associated_group_data.display_name
         volume_update_needed = False
@@ -348,10 +358,10 @@ def generate_cli_commands(instance: oci.core.models.Instance,
 
         # Check 2b: No policy or wrong policy (STATUS_NO_POLICY or STATUS_WRONG_POLICY)
         # --- Use 'assignment create' to assign/replace the policy ---
-        if compliance_status == STATUS_NO_POLICY or compliance_status == STATUS_WRONG_POLICY:
+        if compliance_status.startswith(STATUS_NO_POLICY) or compliance_status.startswith(STATUS_WRONG_POLICY):
             policy_assign_asset_id_arg = f"--asset-id {associated_group_data.id}" # Use EXISTING VG OCID
             policy_assign_policy_id_arg = f"--policy-id {effective_policy_ocid}"
-            logger.debug(f"  - Policy argument for assignment command: '{policy_assign_policy_id_arg}'")
+            console.log(f"[dim]Debug:   - Policy argument for assignment command: '{policy_assign_policy_id_arg}'[/dim]")
 
             command_assign_policy = (
                 f"oci bv volume-backup-policy-assignment create "
@@ -381,7 +391,8 @@ def check_instance_compliance(instance: oci.core.models.Instance,
                               volume_to_group_policy_map: Dict[str, Tuple[oci.core.models.VolumeGroup, Optional[oci.core.models.VolumeBackupPolicy]]],
                               required_policy_name: Optional[str], # For validation
                               required_policy_ocid: Optional[str], # For validation
-                              resolved_policy_ocid_for_fix: Optional[str] # For command generation
+                              resolved_policy_ocid_for_fix: Optional[str], # For command generation
+                              console: Console
                               ) -> Dict[str, Any]:
     """
     Checks a single compute instance for volume group and backup policy compliance.
@@ -408,13 +419,13 @@ def check_instance_compliance(instance: oci.core.models.Instance,
                          instance_volumes.append(boot_volume)
                          instance_volume_ids.append(boot_volume.id)
                     else:
-                         logger.debug(f"Skipping boot volume {bva.boot_volume_id} state: {boot_volume.lifecycle_state}")
+                         console.log(f"[dim]Debug: Skipping boot volume {bva.boot_volume_id} state: {boot_volume.lifecycle_state}[/dim]")
                 except oci.exceptions.ServiceError as e:
                      error_messages.append(f"Failed to get boot volume {bva.boot_volume_id}: {e.status}")
-                     logger.warning(f"Error fetching boot volume {bva.boot_volume_id} for {instance.id}: {e}")
+                     console.log(f"[yellow]Warning: Error fetching boot volume {bva.boot_volume_id} for {instance.id}: {e}[/yellow]")
     except oci.exceptions.ServiceError as e:
         error_messages.append(f"Failed to list boot volume attachments: {e.status}")
-        logger.warning(f"Error listing boot volume attachments for {instance.id}: {e}")
+        console.log(f"[yellow]Warning: Error listing boot volume attachments for {instance.id}: {e}[/yellow]")
 
     # 2. Get attached block volumes
     try:
@@ -431,13 +442,13 @@ def check_instance_compliance(instance: oci.core.models.Instance,
                         instance_volumes.append(block_volume)
                         instance_volume_ids.append(block_volume.id)
                     else:
-                         logger.debug(f"Skipping block volume {va.volume_id} state: {block_volume.lifecycle_state}")
+                         console.log(f"[dim]Debug: Skipping block volume {va.volume_id} state: {block_volume.lifecycle_state}[/dim]")
                 except oci.exceptions.ServiceError as e:
                     error_messages.append(f"Failed to get block volume {va.volume_id}: {e.status}")
-                    logger.warning(f"Error fetching block volume {va.volume_id} for {instance.id}: {e}")
+                    console.log(f"[yellow]Warning: Error fetching block volume {va.volume_id} for {instance.id}: {e}[/yellow]")
     except oci.exceptions.ServiceError as e:
         error_messages.append(f"Failed to list volume attachments: {e.status}")
-        logger.warning(f"Error listing volume attachments for {instance.id}: {e}")
+        console.log(f"[yellow]Warning: Error listing volume attachments for {instance.id}: {e}[/yellow]")
 
 
     # 3. Determine compliance status
@@ -483,7 +494,8 @@ def check_instance_compliance(instance: oci.core.models.Instance,
         volume_group_data,
         assigned_policy,
         resolved_policy_ocid_for_fix, # Pass the OCID intended for the fix command
-        status
+        status,
+        console
     )
 
     # 5. Compile results
@@ -509,19 +521,28 @@ def check_instance_compliance(instance: oci.core.models.Instance,
 
 
 def filter_instance_by_tags(instance: oci.core.models.Instance,
-                           tag_namespace: Optional[str],
-                           tag_key: Optional[str],
-                           tag_value: Optional[str]) -> bool:
-    """Checks if an instance matches the provided tag filters."""
-    if not tag_key or not tag_value:
-        return True # No tag filter applied
-    if tag_namespace:
-        defined_tags = instance.defined_tags or {}
-        namespace_tags = defined_tags.get(tag_namespace, {})
-        return namespace_tags.get(tag_key) == tag_value
-    else:
-        freeform_tags = instance.freeform_tags or {}
-        return freeform_tags.get(tag_key) == tag_value
+                           tag_filters: List[Dict[str, str]]) -> bool:
+    """Checks if an instance matches all provided tag filters."""
+    if not tag_filters:
+        return True # No tag filters applied
+
+    for tag_filter in tag_filters:
+        filter_namespace = tag_filter.get("namespace")
+        filter_key = tag_filter["key"]
+        filter_value = tag_filter["value"]
+
+        if filter_namespace:
+            # Defined tag
+            defined_tags = instance.defined_tags or {}
+            namespace_tags = defined_tags.get(filter_namespace, {})
+            if namespace_tags.get(filter_key) != filter_value:
+                return False
+        else:
+            # Freeform tag
+            freeform_tags = instance.freeform_tags or {}
+            if freeform_tags.get(filter_key) != filter_value:
+                return False
+    return True
 
 
 # --- Main Execution ---
@@ -535,9 +556,7 @@ def main():
     parser.add_argument("--compartment-id", help="Restrict check to only this compartment OCID (ignores platform-filter).")
     parser.add_argument("--show-fix-commands", action="store_true",
                         help="Display OCI CLI commands to fix non-compliant instances.")
-    parser.add_argument("--tag-key", help="Filter instances by this tag key.")
-    parser.add_argument("--tag-namespace", help="Namespace for the defined tag key (required if filtering by defined tag).")
-    parser.add_argument("--tag-value", help="Filter instances by this tag value (requires --tag-key).")
+    parser.add_argument("--tags", nargs='*', help="Filter instances by tags in '[namespace.]key=value' format. Can be specified multiple times.")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging.")
 
     # --- Args for Enhanced Policy Validation ---
@@ -550,35 +569,46 @@ def main():
 
     args = parser.parse_args()
 
-    if args.debug:
-        logging.getLogger().setLevel(logging.DEBUG)
-        for handler in logging.getLogger().handlers: handler.setLevel(logging.DEBUG)
-        logger.info("Debug logging enabled.")
+    # --- Parse and Validate Tags ---
+    parsed_tag_filters: List[Dict[str, str]] = []
+    if args.tags:
+        for tag_arg in args.tags:
+            if '=' not in tag_arg:
+                parser.error(f"Invalid tag format: {tag_arg}. Expected '[namespace.]key=value'.")
+            
+            parts = tag_arg.split('=', 1)
+            key_part = parts[0]
+            value_part = parts[1]
 
-    if args.tag_key and not args.tag_value: parser.error("--tag-value required with --tag-key.")
-    if args.tag_namespace and not (args.tag_key and args.tag_value): parser.error("--tag-key/--tag-value required with --tag-namespace.")
+            if '.' in key_part:
+                namespace_key_parts = key_part.split('.', 1)
+                parsed_tag_filters.append({
+                    "namespace": namespace_key_parts[0],
+                    "key": namespace_key_parts[1],
+                    "value": value_part
+                })
+            else:
+                parsed_tag_filters.append({
+                    "key": key_part,
+                    "value": value_part
+                })
 
-    try:
-        # --- Configuration and Client Initialization ---
-        try:
-            config = oci.config.from_file()
-            oci.config.validate_config(config)
-        except (oci.exceptions.ConfigFileNotFound, oci.exceptions.InvalidConfig) as e:
-             logger.error(f"OCI Config Error: {e}. Please ensure ~/.oci/config is valid.")
-             return 1
+    
+        config = oci.config.from_file()
 
+        console = Console()
         identity_client = oci.identity.IdentityClient(config)
         tenancy_id = config["tenancy"]
 
         # --- Determine region ---
         target_region = args.region
         if not target_region:
-            available_regions = get_regions(identity_client, tenancy_id)
-            if not available_regions: logger.error("No subscribed regions found."); return 1
+            available_regions = get_regions(identity_client, tenancy_id, console)
+            if not available_regions: console.print("[red]No subscribed regions found.[/red]"); return 1
             target_region = available_regions[0].region_name
-            logger.info(f"Using first subscribed region: {target_region}")
+            console.print(f"[green]Using first subscribed region:[/green] [bold]{target_region}[/bold]")
         else:
-            logger.info(f"Using specified region: {target_region}")
+            console.print(f"[green]Using specified region:[/green] [bold]{target_region}[/bold]")
         config["region"] = target_region
         compute_client = oci.core.ComputeClient(config)
         blockstorage_client = oci.core.BlockstorageClient(config)
@@ -587,23 +617,23 @@ def main():
         compartment_ids_to_check: List[str]
         compartment_names_map: Dict[str, str]
         if args.compartment_id:
-            logger.info(f"Checking specified compartment: {args.compartment_id}")
+            console.print(f"[green]Checking specified compartment:[/green] [bold]{args.compartment_id}[/bold]")
             if not args.compartment_id.startswith("ocid1.compartment.oc1."):
-                 logger.warning(f"ID '{args.compartment_id}' doesn't look like compartment OCID.")
+                 console.print(f"[yellow]Warning: ID '{args.compartment_id}' doesn't look like compartment OCID.[/yellow]")
             try:
                  comp_data = identity_client.get_compartment(args.compartment_id).data
                  compartment_ids_to_check = [args.compartment_id]
                  compartment_names_map = {args.compartment_id: f"Specified: {comp_data.name}"}
             except oci.exceptions.ServiceError as e:
-                 logger.error(f"Failed validate/get compartment {args.compartment_id}: {e}. Aborting.")
+                 console.print(f"[red]Error: Failed validate/get compartment {args.compartment_id}: {e}. Aborting.[/red]")
                  return 1
         else:
             compartment_filter = args.platform_filter if args.platform_filter else None
-            logger.info(f"Searching compartments with filter: '{compartment_filter or 'None'}'")
+            console.print(f"[green]Searching compartments with filter:[/green] [bold]'{compartment_filter or 'None'}'[/bold]")
             compartment_ids_to_check, compartment_names_map = get_all_compartments(
-                identity_client, tenancy_id, compartment_filter
+                identity_client, tenancy_id, compartment_filter, console
             )
-            if not compartment_ids_to_check: logger.warning("No compartments found matching criteria."); return 0
+            if not compartment_ids_to_check: console.print("[yellow]No compartments found matching criteria.[/yellow]"); return 0
 
         # List of compartments to search for policies (include root)
         policy_search_compartments = list(set(compartment_ids_to_check + [tenancy_id]))
@@ -612,124 +642,154 @@ def main():
         resolved_policy_ocid_for_fix: Optional[str] = None
         if args.required_policy_ocid:
             resolved_policy_ocid_for_fix = args.required_policy_ocid
-            logger.info(f"Using explicit policy OCID for fix commands: {resolved_policy_ocid_for_fix}")
+            console.print(f"[green]Using explicit policy OCID for fix commands:[/green] [bold]{resolved_policy_ocid_for_fix}[/bold]")
         elif args.required_policy_name:
             resolved_policy_ocid_for_fix = find_policy_ocid_by_name(
-                blockstorage_client, args.required_policy_name, policy_search_compartments
+                blockstorage_client, args.required_policy_name, policy_search_compartments, console
             )
             if not resolved_policy_ocid_for_fix:
-                logger.warning(f"Could not resolve unique OCID for policy name '{args.required_policy_name}'. Placeholder used in fixes.")
+                console.print(f"[yellow]Warning: Could not resolve unique OCID for policy name '{args.required_policy_name}'. Placeholder used in fixes.[/yellow]")
             else:
-                 logger.info(f"Resolved policy OCID for fix commands from name '{args.required_policy_name}': {resolved_policy_ocid_for_fix}")
+                 console.print(f"[green]Resolved policy OCID for fix commands from name '{args.required_policy_name}':[/green] [bold]{resolved_policy_ocid_for_fix}[/bold]")
 
         # --- Pre-fetch Volume Group & Policy Data ---
-        volume_to_group_policy_map = get_volume_group_map(blockstorage_client, compartment_ids_to_check)
+        console.print("[green]Building volume-to-volume-group-and-policy mapping...[/green]")
+        volume_to_group_policy_map = get_volume_group_map(blockstorage_client, compartment_ids_to_check, console)
 
         # --- Process Instances ---
         all_results: List[Dict[str, Any]] = []
-        instances_processed, instances_skipped_state, instances_skipped_tag = 0, 0, 0
+        instances_processed, instances_skipped_state, instances_skipped_tag, instances_skipped_oke = 0, 0, 0, 0
 
-        for comp_id in compartment_ids_to_check:
-            comp_name = compartment_names_map.get(comp_id, comp_id)
-            logger.info(f"--- Checking compartment: {comp_name} ({comp_id}) ---")
-            try:
-                instance_summaries = list_call_get_all_results(compute_client.list_instances, compartment_id=comp_id).data
-                if not instance_summaries: logger.info("No instances found."); continue
+        with Live(Spinner("dots", text="Initializing..."), console=console, screen=False, refresh_per_second=4) as live:
+            for comp_id in compartment_ids_to_check:
+                comp_name = compartment_names_map.get(comp_id, comp_id)
+                live.update(Spinner("dots", text=f"[bold green]Checking compartment:[/bold green] {comp_name} ([dim]{comp_id}[/dim])..."))
+                try:
+                    instance_summaries = list_call_get_all_results(compute_client.list_instances, compartment_id=comp_id).data
+                    if not instance_summaries:
+                        live.console.log(f"[yellow]No instances found in {comp_name}.[/yellow]")
+                        continue
 
-                for inst_summary in instance_summaries:
-                    if inst_summary.lifecycle_state in [oci.core.models.Instance.LIFECYCLE_STATE_TERMINATED,
+                    for inst_summary in instance_summaries:
+                        if inst_summary.display_name and inst_summary.display_name.lower().startswith("oke-"):
+                            instances_skipped_oke += 1; console.log(f"[dim]Debug: Skipping OKE instance: {inst_summary.display_name} ({inst_summary.id})[/dim]"); continue
+
+                        if inst_summary.lifecycle_state in [oci.core.models.Instance.LIFECYCLE_STATE_TERMINATED,
                                                          oci.core.models.Instance.LIFECYCLE_STATE_TERMINATING]:
-                        instances_skipped_state += 1; logger.debug(f"Skipping {inst_summary.id} state: {inst_summary.lifecycle_state}"); continue
+                            instances_skipped_state += 1; console.log(f"[dim]Debug: Skipping {inst_summary.id} state: {inst_summary.lifecycle_state}[/dim]"); continue
 
-                    try:
-                        instance = compute_client.get_instance(inst_summary.id).data
-                        instances_processed += 1
+                        try:
+                            instance = compute_client.get_instance(inst_summary.id).data
+                            instances_processed += 1
 
-                        if not filter_instance_by_tags(instance, args.tag_namespace, args.tag_key, args.tag_value):
-                            instances_skipped_tag += 1; logger.debug(f"Skipping {instance.id} due to tag filter."); continue
+                            if not filter_instance_by_tags(instance, parsed_tag_filters):
+                                instances_skipped_tag += 1; console.log(f"[dim]Debug: Skipping {instance.id} due to tag filter.[/dim]"); continue
 
-                        logger.info(f"Checking instance: {instance.display_name} ({instance.id})")
-                        result = check_instance_compliance(
-                            instance, compute_client, blockstorage_client,
-                            volume_to_group_policy_map,
-                            args.required_policy_name, args.required_policy_ocid,
-                            resolved_policy_ocid_for_fix
-                        )
-                        result["compartment_name"] = comp_name
-                        all_results.append(result)
+                            live.console.log(f"[dim]Processing instance:[/dim] {instance.display_name} ([dim]{instance.id}[/dim])")
+                            result = check_instance_compliance(
+                                instance, compute_client, blockstorage_client,
+                                volume_to_group_policy_map,
+                                args.required_policy_name, args.required_policy_ocid,
+                                resolved_policy_ocid_for_fix,
+                                console
+                            )
+                            result["compartment_name"] = comp_name
+                            all_results.append(result)
 
-                    except oci.exceptions.ServiceError as e: logger.warning(f"Could not get details for {inst_summary.id}. Skipping. Error: {e}")
-                    except Exception as e: logger.error(f"Unexpected error processing {inst_summary.id}. Skipping.", exc_info=True)
+                        except oci.exceptions.ServiceError as e:
+                            live.console.log(f"[red]Error getting details for {inst_summary.id}. Skipping. Error: {e}[/red]")
+                        except Exception as e:
+                            live.console.log(f"[red]Unexpected error processing {inst_summary.id}. Skipping. Error: {e}[/red]")
 
-            except oci.exceptions.ServiceError as e: logger.error(f"Error listing instances in {comp_id}. Skipping. Error: {e}")
+                except oci.exceptions.ServiceError as e:
+                    live.console.log(f"[red]Error listing instances in {comp_id}. Skipping compartment. Error: {e}[/red]")
 
         # --- Reporting ---
-        logger.info(f"--- Compliance Check Summary ---")
-        logger.info(f"Processed {instances_processed} active instances.")
-        if instances_skipped_state > 0: logger.info(f"Skipped {instances_skipped_state} terminated/terminating instances.")
-        if args.tag_key and args.tag_value: logger.info(f"Skipped {instances_skipped_tag} instances due to tag filter.")
-        if not all_results: logger.info("No instances processed matching criteria."); return 0
+        console.log(f"[bold blue]--- Compliance Check Summary ---[/bold blue]")
+        console.log(f"Processed [bold]{instances_processed}[/bold] active instances.")
+        if instances_skipped_state > 0: console.log(f"Skipped [yellow]{instances_skipped_state}[/yellow] terminated/terminating instances.")
+        if parsed_tag_filters: console.log(f"Skipped [yellow]{instances_skipped_tag}[/yellow] instances due to tag filter.")
+        if not all_results: console.log("No instances processed matching criteria."); return 0
 
-        # --- Prepare Output Data ---
-        headers = ["Instance Name", "Compartment", "VG Name", "Policy Name", "Volumes", "Status", "Errors"]
-        if args.show_policy_details: headers.insert(4, "Policy Schedule")
-        table_data, csv_data = [], []
-        csv_headers = ["instance_name", "instance_id", "compartment_name", "compartment_id",
-                       "availability_domain", "volume_group_name", "volume_group_id",
-                       "backup_policy_name", "backup_policy_id", "backup_policy_schedule",
-                       "volumes_in_group", "total_volumes", "compliance_status",
-                       "errors", "instance_volume_ids", "group_volume_ids", "cli_commands"]
+        # --- Prepare Output Data for Rich Table ---
+        compliance_table = Table(
+            title="Compliance Results",
+            show_lines=True,
+            box=ASCII,
+            header_style="bold blue"
+        )
+        compliance_table.add_column("Instance Name", justify="left", style="cyan", no_wrap=True)
+        compliance_table.add_column("Compartment", justify="left", style="magenta")
+        compliance_table.add_column("VG Name", justify="left")
+        compliance_table.add_column("Policy Name", justify="left")
+        if args.show_policy_details:
+            compliance_table.add_column("Policy Schedule", justify="left")
+        compliance_table.add_column("Volumes", justify="center")
+        compliance_table.add_column("Status", justify="left")
+        compliance_table.add_column("Errors", justify="left")
 
         for r in all_results:
             volume_info = f"{r['volumes_in_group']}/{r['total_volumes']}"
             error_summary = "; ".join(r['errors']) if r['errors'] else "None"
             policy_schedule_formatted = format_policy_schedule(r['backup_policy_details'])
-            row = [ r["instance_name"], r["compartment_name"], r["volume_group_name"], r["backup_policy_name"],
-                    volume_info, r["compliance_status"], error_summary ]
-            if args.show_policy_details: row.insert(4, policy_schedule_formatted)
-            table_data.append(row)
-            csv_data.append([
-                r["instance_name"], r["instance_id"], r["compartment_name"], r["compartment_id"],
-                r["availability_domain"], r["volume_group_name"], r["volume_group_id"],
-                r["backup_policy_name"], r["backup_policy_id"], policy_schedule_formatted,
-                r["volumes_in_group"], r["total_volumes"], r["compliance_status"], error_summary,
-                json.dumps(r["instance_volume_ids"]), json.dumps(r["group_volume_ids"]),
-                "\n".join(r["cli_commands"]) ])
 
-        # --- Print Table ---
-        print("\n--- Compliance Results ---")
-        print(tabulate(table_data, headers=headers, tablefmt="grid"))
+            status_text = Text(r['compliance_status'])
+            if "Non-compliant" in r['compliance_status']:
+                status_text.stylize("bold red")
+            elif r['compliance_status'] == STATUS_COMPLIANT:
+                status_text.stylize("bold green")
+            elif "N/A" in r['compliance_status']:
+                status_text.stylize("yellow")
+
+            row_data = [
+                r["instance_name"],
+                r["compartment_name"],
+                r["volume_group_name"],
+                r["backup_policy_name"],
+            ]
+            if args.show_policy_details:
+                row_data.append(policy_schedule_formatted)
+            row_data.extend([
+                volume_info,
+                status_text,
+                error_summary
+            ])
+            compliance_table.add_row(*row_data)
+
+        console.print(compliance_table)
 
         # --- Print Fix Commands ---
         if args.show_fix_commands:
-            print("\n--- Suggested OCI CLI Fix Commands ---")
+            console.print("\n[bold blue]--- Suggested OCI CLI Fix Commands ---[/bold blue]")
             fix_commands_printed = False
             for r in all_results:
                 if r["cli_commands"]:
-                    print(f"\n# Commands for Instance: {r['instance_name']} ({r['instance_id']})")
-                    for cmd in r["cli_commands"]: print(cmd)
+                    console.print(Panel(
+                        f"[bold magenta]Commands for Instance: {r['instance_name']} ({r['instance_id']})[/bold magenta]",
+                        border_style="magenta",
+                        box=ASCII
+                    ))
+                    for cmd in r["cli_commands"]:
+                        syntax = Syntax(cmd, "bash", theme="monokai", line_numbers=False, word_wrap=True)
+                        console.print(syntax)
                     fix_commands_printed = True
-            if not fix_commands_printed: print("No fix commands generated.")
+            if not fix_commands_printed: console.print("No fix commands generated.")
 
         # --- Print Summary ---
-        compliant_count = sum(1 for r in all_results if r["compliance_status"] == STATUS_COMPLIANT)
-        total_relevant = len(all_results)
-        if total_relevant > 0: logger.info(f"Overall Compliance: {compliant_count}/{total_relevant} instances = {(compliant_count/total_relevant*100):.1f}% compliant.")
-        else: logger.info("No relevant instances processed.")
-
-        # --- Write CSV ---
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        csv_filename = f"oci_vg_compliance_{target_region}_{timestamp}.csv"
-        try:
-            with open(csv_filename, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f); writer.writerow(csv_headers); writer.writerows(csv_data)
-            logger.info(f"Full results exported to: {csv_filename}")
-        except IOError as e: logger.error(f"Failed to write CSV report {csv_filename}: {e}")
-
-    except oci.exceptions.ServiceError as e: logger.error(f"Service error: {e}", exc_info=True); return 1
-    except Exception as e: logger.error("Unexpected error:", exc_info=True); return 1
-
-    return 0
+        console.print("\n[bold blue]--- Compliance Check Summary ---[/bold blue]")
+        console.print(f"Processed [bold]{instances_processed}[/bold] active instances.")
+        if instances_skipped_state > 0: console.print(f"Skipped [yellow]{instances_skipped_state}[/yellow] terminated/terminating instances.")
+        if instances_skipped_oke > 0: console.print(f"Skipped [yellow]{instances_skipped_oke}[/yellow] OKE instances (name starts with 'oke-').")
+        if parsed_tag_filters: console.print(f"Skipped [yellow]{instances_skipped_tag}[/yellow] instances due to tag filter.")
+        if not all_results: console.print("No instances processed matching criteria.")
+        else:
+            compliant_count = sum(1 for r in all_results if r["compliance_status"] == STATUS_COMPLIANT)
+            total_relevant = len(all_results)
+            if total_relevant > 0:
+                compliance_percentage = (compliant_count/total_relevant*100)
+                console.print(f"Overall Compliance: [bold]{compliant_count}/{total_relevant}[/bold] instances = [bold green]{compliance_percentage:.1f}%[/bold green] compliant.")
+            else:
+                console.print("No relevant instances processed.")
 
 if __name__ == "__main__":
     sys.exit(main())
